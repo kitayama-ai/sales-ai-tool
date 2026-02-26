@@ -156,13 +156,16 @@ function monitorAllFolders() {
         // 4. 録画URL抽出（Notta/Zoomドキュメントから）
         const recordingUrl = extractRecordingUrl(text, fileId);
 
-        console.log(`🚀 分析開始: ${fileName}`);
+        // 5. ソース判定（GoogleMeet or Zoom）
+        const source = detectSource_(fileName, text);
 
-        // 5. AI分析
+        console.log(`🚀 分析開始: ${fileName} [${source}]`);
+
+        // 6. AI分析
         const result = callGeminiAPI(text);
         if (result) {
-          sendToSlack(result, fileName, file.getUrl(), recordingUrl, target);
-          saveToSheet(result, fileName, file.getUrl(), recordingUrl, target);
+          sendToSlack(result, fileName, file.getUrl(), recordingUrl, target, source);
+          saveToSheet(result, fileName, file.getUrl(), recordingUrl, target, source);
           newProcessedFiles[fileId] = now.getTime();
           hasUpdate = true;
           console.log("✅ 完了: " + fileName);
@@ -220,8 +223,8 @@ function monitorNotta() {
     const result = callGeminiAPI(text);
     if (result) {
       const nottaUrl = detail.share_url || `https://app.notta.ai/transcript/${t.id}`;
-      sendToSlack(result, t.title, nottaUrl, recordingUrl, target);
-      saveToSheet(result, t.title, nottaUrl, recordingUrl, target);
+      sendToSlack(result, t.title, nottaUrl, recordingUrl, target, "Zoom");
+      saveToSheet(result, t.title, nottaUrl, recordingUrl, target, "Zoom");
       processedNotta[t.id] = new Date().getTime();
       hasUpdate = true;
       console.log("✅ Notta完了: " + t.title);
@@ -344,6 +347,13 @@ function getNottaTranscriptDetail_(apiKey, transcriptId) {
   return null;
 }
 
+// ソース判定（GoogleMeet or Zoom）
+function detectSource_(fileName, text) {
+  const zoomKeywords = ["Zoom", "zoom", "Notta", "notta", "ZOOM"];
+  const isZoom = zoomKeywords.some(k => fileName.includes(k) || text.substring(0, 500).includes(k));
+  return isZoom ? "Zoom" : "GoogleMeet";
+}
+
 function matchTarget_(participants, title) {
   for (const target of TARGETS) {
     if (!target) continue;
@@ -398,7 +408,9 @@ function callGeminiAPI(transcriptText) {
 // ==========================================
 // 8. Slack通知（録画URL・リード温度感・スコアバー追加）
 // ==========================================
-function sendToSlack(data, fileName, fileUrl, recordingUrl, target) {
+function sendToSlack(data, fileName, fileUrl, recordingUrl, target, source) {
+  source = source || "GoogleMeet";
+  const sourceLabel = source === "Zoom" ? "🟦 Zoom" : "🟩 GoogleMeet";
   const score = parseInt(data.score || 0);
   let color = score >= 85 ? "#FFD700" : (score >= 75 ? "#36a64f" : (score >= 65 ? "#FFA500" : "#ff0000"));
   let emoji = score >= 85 ? "🏆" : (score >= 75 ? "✅" : (score >= 65 ? "🔶" : "🚨"));
@@ -426,7 +438,7 @@ function sendToSlack(data, fileName, fileUrl, recordingUrl, target) {
 
   const blocks = [
     { type: "header", text: { type: "plain_text", text: `${emoji} 商談分析: ${score}点`, emoji: true } },
-    { type: "context", elements: [{ type: "mrkdwn", text: `👤 担当: ${mention} | 📄 <${fileUrl}|${fileName}>` }] },
+    { type: "context", elements: [{ type: "mrkdwn", text: `${sourceLabel} | 👤 担当: ${mention} | 📄 <${fileUrl}|${fileName}>` }] },
     { type: "section", text: { type: "mrkdwn", text: `*判定:* *${resultEmoji}*` } }
   ];
 
@@ -508,21 +520,16 @@ function sendToSlack(data, fileName, fileUrl, recordingUrl, target) {
 // ==========================================
 // 9. Sheets保存（録画URL・リード温度感列追加）
 // ==========================================
-function saveToSheet(data, fileName, fileUrl, recordingUrl, target) {
+function saveToSheet(data, fileName, fileUrl, recordingUrl, target, source) {
   if (!SPREADSHEET_ID) return;
+  source = source || "GoogleMeet";
+  const sheetName = source === "Zoom" ? "商談ログ_Zoom" : "商談ログ_GoogleMeet";
 
   try {
     const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    let sheet = ss.getSheetByName("商談ログ");
+    let sheet = ss.getSheetByName(sheetName);
     if (!sheet) {
-      // 既存シートがあればリネーム、なければ作成
-      const existing = ss.getSheets()[0];
-      if (existing.getLastRow() === 0) {
-        existing.setName("商談ログ");
-        sheet = existing;
-      } else {
-        sheet = ss.insertSheet("商談ログ");
-      }
+      sheet = ss.insertSheet(sheetName);
     }
 
     const today = Utilities.formatDate(new Date(), "JST", "yyyy/MM/dd HH:mm");
@@ -605,10 +612,18 @@ function analyzeScores() {
 
   try {
     const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    const logSheet = ss.getSheetByName("商談ログ") || ss.getSheets()[0];
-    if (logSheet.getLastRow() < 2) return;
 
-    const logData = logSheet.getRange(2, 1, logSheet.getLastRow() - 1, logSheet.getLastColumn()).getValues();
+    // 両タブからデータを統合
+    const logData = [];
+    const tabNames = ["商談ログ_GoogleMeet", "商談ログ_Zoom", "商談ログ"]; // 旧タブも対応
+    tabNames.forEach(tabName => {
+      const sheet = ss.getSheetByName(tabName);
+      if (sheet && sheet.getLastRow() >= 2) {
+        const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+        data.forEach(row => logData.push(row));
+      }
+    });
+    if (logData.length === 0) return;
 
     const skillNames = ["権威性", "損失回避", "リフレーミング", "アンカー", "クロージング"];
     // カラムインデックス（0始まり）
@@ -942,13 +957,15 @@ function testWithSampleData() {
     return;
   }
 
-  console.log("📊 テストデータでSlack送信テスト...");
-  sendToSlack(sampleResult, "【テスト】Meta広告流入_サンプル商談", "https://docs.google.com/document/d/test", "https://zoom.us/rec/share/test-recording", target);
+  console.log("📊 テスト1: GoogleMeetタブへ保存...");
+  sendToSlack(sampleResult, "【テスト】GoogleMeet商談", "https://docs.google.com/document/d/test", "", target, "GoogleMeet");
+  saveToSheet(sampleResult, "【テスト】GoogleMeet商談", "https://docs.google.com/document/d/test", "", target, "GoogleMeet");
 
-  console.log("📊 テストデータでSheets保存テスト...");
-  saveToSheet(sampleResult, "【テスト】Meta広告流入_サンプル商談", "https://docs.google.com/document/d/test", "https://zoom.us/rec/share/test-recording", target);
+  console.log("📊 テスト2: Zoomタブへ保存...");
+  sendToSlack(sampleResult, "【テスト】Zoom商談_Meta広告流入", "https://app.notta.ai/transcript/test", "https://zoom.us/rec/share/test-recording", target, "Zoom");
+  saveToSheet(sampleResult, "【テスト】Zoom商談_Meta広告流入", "https://app.notta.ai/transcript/test", "https://zoom.us/rec/share/test-recording", target, "Zoom");
 
-  console.log("✅ テスト完了 - Slackとシートを確認してください");
+  console.log("✅ テスト完了 - Slack(2件)とシート(2タブ)を確認してください");
 }
 
 // 手動で特定ファイルを分析
@@ -976,8 +993,9 @@ function analyzeSpecificFile() {
   const result = callGeminiAPI(text);
   if (result) {
     console.log("📊 結果:", JSON.stringify(result, null, 2));
-    sendToSlack(result, fileName, file.getUrl(), recordingUrl, target);
-    saveToSheet(result, fileName, file.getUrl(), recordingUrl, target);
+    const source = detectSource_(fileName, text);
+    sendToSlack(result, fileName, file.getUrl(), recordingUrl, target, source);
+    saveToSheet(result, fileName, file.getUrl(), recordingUrl, target, source);
     console.log("✅ 完了");
   } else {
     console.error("❌ AI分析失敗");
