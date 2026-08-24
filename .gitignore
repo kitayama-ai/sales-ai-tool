@@ -1,0 +1,15 @@
+
+# --- secrets (auto-added by security audit) ---
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.sample
+env.
+*.pem
+*.key
+credentials.json
+service-account*.json
+secrets.toml
+.streamlit/secrets.toml
+.DS_Store
